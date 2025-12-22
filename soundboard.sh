@@ -294,7 +294,7 @@ show_stats() {
 main_menu() {
     while true; do
         local choice
-        choice=$(dialog --stdout --title "Soundboard Manager" \
+        choice=$(dialog --stdout --title "Soundboard Sunda" \
             --menu "Select option:" 20 60 10 \
             1 "Add Songs" \
             2 "Remove Songs" \
