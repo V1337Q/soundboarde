@@ -32,14 +32,22 @@ sudo pacman -S mpg123 dialog bc
 ```
 
 ### Clone repository
+```bash
 git clone https://github.com/V1337Q/soundboarde.git; cd soundboarde
+```
 
 ### Buat script dapat di-eksekusi
+```bash
 chmod +x soundboard.sh
+```
 
 ### Jalankan
+```bash
 ./soundboard.sh
+```
 
 ### Pindahkan ke path bin
+```bash
 sudo cp soundboard.sh /usr/local/bin/soundboard
+```
 
