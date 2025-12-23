@@ -1,5 +1,5 @@
 
-# 🎵 Soundboard - Terminal Audio Player
+# Soundboard Sunda
 
 <div align="center">
 
