@@ -1,33 +1,67 @@
 #!/bin/bash
 
-#Dependensi: mpg123, dialog, bc
+# Dependensi error handling
+check_deps() {
+    echo "Checking dependencies..."
+    
+    # Check dialog
+    if ! command -v dialog &> /dev/null; then
+        echo "ERROR: 'dialog' tidak ditemukan!"
+        echo "Install: sudo apt install dialog"
+        return 1
+    fi
+    
+    # Check mpg123
+    if ! command -v mpg123 &> /dev/null; then
+        echo "ERROR: 'mpg123' tidak ditemukan!"
+        echo "Install: sudo apt install mpg123"
+        return 1
+    fi
+    
+    # Check bc
+    if ! command -v bc &> /dev/null; then
+        echo "ERROR: 'bc' tidak ditemukan!"
+        echo "Install: sudo apt install bc"
+        return 1
+    fi
+    
+    echo "All dependencies OK!"
+    return 0
+}
 
-CONFIG_FILE="$HOME/.soundboard_config"
-PLAYLIST_FILE="$HOME/.soundboard_playlist"
-CURRENT_POS_FILE="$HOME/.soundboard_current"
+# Konfigurasi
+CONFIG_DIR="$HOME/.soundboard"
+CONFIG_FILE="$CONFIG_DIR/config"
+PLAYLIST_FILE="$CONFIG_DIR/playlist.txt"
+VOLUME_FILE="$CONFIG_DIR/volume.txt"
 
-# Warna buat output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Buat direktori kalau belum ada
+mkdir -p "$CONFIG_DIR"
 
+# Variabel global
 declare -a SONGS
 declare -a SONG_NAMES
-CURRENT_SONG=""
-IS_PLAYING=0
-PLAYER_PID=""
 VOLUME=80
+NOW_PLAYING=""
+PLAYER_PID=""
 
-# load konfigurasi
+# Load konfigurasi
 load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        source "$CONFIG_FILE"
+    # Load volume
+    if [[ -f "$VOLUME_FILE" ]]; then
+        VOLUME=$(cat "$VOLUME_FILE")
     fi
+    
+    # Load playlist
     if [[ -f "$PLAYLIST_FILE" ]]; then
-        mapfile -t SONGS < "$PLAYLIST_FILE"
-        # ekstrak HANYA nama file buat Display aja
+        SONGS=()
+        while IFS= read -r line; do
+            if [[ -n "$line" ]] && [[ -f "$line" ]]; then
+                SONGS+=("$line")
+            fi
+        done < "$PLAYLIST_FILE"
+        
+        # Buat nama untuk display
         SONG_NAMES=()
         for song in "${SONGS[@]}"; do
             SONG_NAMES+=("$(basename "$song")")
@@ -35,335 +69,380 @@ load_config() {
     fi
 }
 
-# save konfigurasi
+# Save konfigurasi
 save_config() {
-    echo "VOLUME=$VOLUME" > "$CONFIG_FILE"
-    printf "%s\n" "${SONGS[@]}" > "$PLAYLIST_FILE"
-}
-
-# kalkukasi durasi average
-calculate_average_duration() {
-    local total=0
-    local count=0
+    # Save volume
+    echo "$VOLUME" > "$VOLUME_FILE"
     
+    # Save playlist
+    > "$PLAYLIST_FILE"
     for song in "${SONGS[@]}"; do
-        if [[ -f "$song" ]]; then
-            # aproksimasi durasi menggunakan mpg123
-            duration=$(mpg123 -t "$song" 2>&1 | grep "Decoding of" | awk '{print $3}')
-            if [[ ! -z "$duration" ]]; then
-                total=$(echo "$total + $duration" | bc)
-                ((count++))
-            fi
-        fi
+        echo "$song" >> "$PLAYLIST_FILE"
     done
-    
-    if [[ $count -gt 0 ]]; then
-        avg=$(echo "scale=2; $total / $count" | bc)
-        echo "$avg seconds"
-    else
-        echo "No songs"
-    fi
 }
 
-# menambah lagu ke PLAYLISTST
-add_songs() {
-    local files
-    files=$(dialog --stdout --title "Add MP3 Files" --fselect "$HOME/" 20 60)
+# Stop playback
+stop_playback() {
+    if [[ -n "$PLAYER_PID" ]] && kill -0 "$PLAYER_PID" 2>/dev/null; then
+        kill -9 "$PLAYER_PID" 2>/dev/null
+    fi
+    PLAYER_PID=""
+    NOW_PLAYING=""
+}
+
+# Play song
+play_song() {
+    local index=$1
+    local song="${SONGS[$index]}"
     
-    if [[ $? -eq 0 ]] && [[ ! -z "$files" ]]; then
-        while IFS= read -r file; do
-            if [[ "$file" == *.mp3 ]] || [[ "$file" == *.MP3 ]]; then
-                SONGS+=("$file")
-                SONG_NAMES+=("$(basename "$file")")
-            fi
-        done <<< "$files"
+    if [[ ! -f "$song" ]]; then
+        dialog --msgbox "File tidak ditemukan:\n$song" 6 50
+        return 1
+    fi
+    
+    stop_playback
+    NOW_PLAYING="${SONG_NAMES[$index]}"
+    
+    mpg123 -g "$VOLUME" "$song" 2>/dev/null &
+    PLAYER_PID=$!
+    
+    return 0
+}
+
+#Soundboard Utaman
+show_soundboard() {
+    while true; do
+        #pilihan untuk dialog
+        local items=()
         
-        save_config
-        dialog --msgbox "Songs added successfully!" 6 40
-    fi
-}
-
-# hilangin file dari playlist
-remove_songs() {
-    if [[ ${#SONGS[@]} -eq 0 ]]; then
-        dialog --msgbox "No songs in playlist!" 6 40
-        return
-    fi
-    
-    local options=()
-    for i in "${!SONG_NAMES[@]}"; do
-        options+=("$i" "${SONG_NAMES[$i]}" "off")
-    done
-    
-    local to_remove
-    to_remove=$(dialog --stdout --title "Remove Songs" \
-        --checklist "Select songs to remove:" \
-        20 60 10 "${options[@]}")
-    
-    if [[ $? -eq 0 ]] && [[ ! -z "$to_remove" ]]; then
-        for i in $(echo "$to_remove" | tr ' ' '\n' | sort -rn); do
-            unset SONGS[$i]
-            unset SONG_NAMES[$i]
+        # Header
+        local header="SOUNDBOARD ABAL-ABAL"
+        if [[ -n "$NOW_PLAYING" ]]; then
+            header+=" | Now Playing: $NOW_PLAYING"
+        fi
+        header+=" | Volume: ${VOLUME}%"
+        
+        # Tambahkan semua lagu sebagai pilihan
+        for i in "${!SONG_NAMES[@]}"; do
+            local name="${SONG_NAMES[$i]}"
+            # Potong kalau terlalu panjang
+            if [[ ${#name} -gt 40 ]]; then
+                name="${name:0:37}..."
+            fi
+            
+            # render indikator
+            if [[ "$name" == "$NOW_PLAYING" ]]; then
+                name="▶ $name"
+            else
+                name="   $name"
+            fi
+            
+            items+=("$i" "$name")
         done
         
-        # reindex array
-        SONGS=("${SONGS[@]}")
-        SONG_NAMES=("${SONG_NAMES[@]}")
+        #psi kontrol
+        local total_songs=${#SONGS[@]}
+        items+=("---" "──────────────────────────────")
+        items+=("add" "Tambahkan lagu/sound baru (.mp3)")
+        items+=("vol" "Atur Volume")
+        items+=("stop" "STOP playback")
+        items+=("exit" "Exit")
         
-        save_config
-        dialog --msgbox "Songs removed successfully!" 6 40
-    fi
-}
-
-#re-arrange lagu
-rearrange_songs() {
-    if [[ ${#SONGS[@]} -lt 2 ]]; then
-        dialog --msgbox "Need at least 2 songs to rearrange!" 6 40
-        return
-    fi
-    
-    local options=()
-    for i in "${!SONG_NAMES[@]}"; do
-        options+=("$i" "${SONG_NAMES[$i]}")
-    done
-    
-    local order
-    order=$(dialog --stdout --title "Rearrange Songs" \
-        --menu "Select song to move (use arrow keys and Enter):" \
-        20 60 10 "${options[@]}")
-    
-    if [[ $? -eq 0 ]] && [[ ! -z "$order" ]]; then
-        local new_order=$(dialog --stdout --title "Move to Position" \
-            --inputbox "Enter new position (1-${#SONGS[@]}):" \
-            8 40 "$((order + 1))")
+        # Tampilkan dialog
+        local choice
+        choice=$(dialog \
+            --title "$header" \
+            --menu "Pilih lagu atau aksi:" \
+            25 70 20 \
+            "${items[@]}" \
+            3>&1 1>&2 2>&3)
         
-        if [[ $? -eq 0 ]] && [[ ! -z "$new_order" ]]; then
-            new_order=$((new_order - 1))
-            if [[ $new_order -ge 0 ]] && [[ $new_order -lt ${#SONGS[@]} ]]; then
-                local temp_song="${SONGS[$order]}"
-                local temp_name="${SONG_NAMES[$order]}"
-                
-                # remove from current positoiton
-                unset SONGS[$order]
-                unset SONG_NAMES[$order]
-                SONGS=("${SONGS[@]}")
-                SONG_NAMES=("${SONG_NAMES[@]}")
-                
-                # Insert pada posisi baru
-                SONGS=("${SONGS[@]:0:$new_order}" "$temp_song" "${SONGS[@]:$new_order}")
-                SONG_NAMES=("${SONG_NAMES[@]:0:$new_order}" "$temp_name" "${SONG_NAMES[@]:$new_order}")
-                
-                save_config
-                dialog --msgbox "Song moved successfully!" 6 40
-            fi
-        fi
-    fi
-}
-
-# mutar lagu pilihan
-play_song() {
-    if [[ ${#SONGS[@]} -eq 0 ]]; then
-        dialog --msgbox "No songs in playlist!" 6 40
-        return
-    fi
-    
-    local options=()
-    for i in "${!SONG_NAMES[@]}"; do
-        options+=("$i" "${SONG_NAMES[$i]}")
-    done
-    
-    local choice
-    choice=$(dialog --stdout --title "Play Song" \
-        --menu "Select song to play:" \
-        20 60 10 "${options[@]}")
-    
-    if [[ $? -eq 0 ]] && [[ ! -z "$choice" ]]; then
-        stop_playback
-        CURRENT_SONG="${SONGS[$choice]}"
-        echo "$choice" > "$CURRENT_POS_FILE"
+        local ret=$?
         
-        # memutar dengan kontrol audio
-        mpg123 -g $VOLUME "$CURRENT_SONG" 2>/dev/null &
-        PLAYER_PID=$!
-        IS_PLAYING=1
-        
-        dialog --msgbox "Now playing: $(basename "$CURRENT_SONG")" 6 50
-    fi
-}
-
-#control playback
-playback_control() {
-    if [[ $IS_PLAYING -eq 0 ]]; then
-        dialog --msgbox "No song is currently playing!" 6 40
-        return
-    fi
-    
-    local choice
-    choice=$(dialog --stdout --title "Playback Control" \
-        --menu "Select action:" 12 40 5 \
-        1 "Pause/Resume" \
-        2 "Stop" \
-        3 "Volume Up" \
-        4 "Volume Down" \
-        5 "Skip to Next")
-    
-    case $choice in
-        1) # Pause/Resume
-            if kill -STOP $PLAYER_PID 2>/dev/null; then
-                dialog --msgbox "Playback paused" 5 30
-            else
-                kill -CONT $PLAYER_PID 2>/dev/null
-                dialog --msgbox "Playback resumed" 5 30
-            fi
-            ;;
-        2) # Stop
+        # Handle pilihan
+        if [[ $ret -eq 0 ]]; then
+            case "$choice" in
+                ---)
+                    ;;
+                add)
+                    add_song_dialog
+                    ;;
+                vol)
+                    change_volume_dialog
+                    ;;
+                stop)
+                    stop_playback
+                    NOW_PLAYING=""
+                    ;;
+                exit)
+                    stop_playback
+                    clear
+                    exit 0
+                    ;;
+                *)
+                    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -lt ${#SONGS[@]} ]]; then
+                        play_song "$choice"
+                    fi
+                    ;;
+            esac
+        else
             stop_playback
-            dialog --msgbox "Playback stopped" 5 30
-            ;;
-        3) # Volume Up
-            if [[ $VOLUME -lt 100 ]]; then
-                VOLUME=$((VOLUME + 10))
-                update_volume
-                dialog --msgbox "Volume: $VOLUME%" 5 30
-            fi
-            ;;
-        4) # Volume Down
-            if [[ $VOLUME -gt 0 ]]; then
-                VOLUME=$((VOLUME - 10))
-                update_volume
-                dialog --msgbox "Volume: $VOLUME%" 5 30
-            fi
-            ;;
-        5) # Skip
-            next_song
-            ;;
-    esac
+            clear
+            exit 0
+        fi
+    done
 }
 
-#stop playback
-stop_playback() {
-    if [[ ! -z "$PLAYER_PID" ]] && kill -0 $PLAYER_PID 2>/dev/null; then
-        kill -9 $PLAYER_PID 2>/dev/null
-    fi
-    IS_PLAYING=0
-    PLAYER_PID=""
-}
-
-#update volume
-update_volume() {
-    if [[ ! -z "$PLAYER_PID" ]] && kill -0 $PLAYER_PID 2>/dev/null; then
-        kill -USR1 $PLAYER_PID 2>/dev/null
-    fi
-    save_config
-}
-
-#play next song
-next_song() {
-    if [[ -f "$CURRENT_POS_FILE" ]]; then
-        current_pos=$(cat "$CURRENT_POS_FILE")
-        next_pos=$(( (current_pos + 1) % ${#SONGS[@]} ))
-        stop_playback
-        CURRENT_SONG="${SONGS[$next_pos]}"
-        echo "$next_pos" > "$CURRENT_POS_FILE"
-        
-        mpg123 -g $VOLUME "$CURRENT_SONG" 2>/dev/null &
-        PLAYER_PID=$!
-        IS_PLAYING=1
-    fi
-}
-
-# statistics
-show_stats() {
-    local avg_duration=$(calculate_average_duration)
-    local stats="Playlist Statistics:\n\n"
-    stats+="Total Songs: ${#SONGS[@]}\n"
-    stats+="Average Duration: $avg_duration\n\n"
-    stats+="Current Volume: $VOLUME%\n"
-    
-    if [[ $IS_PLAYING -eq 1 ]]; then
-        stats+="Status: Playing\n"
-        stats+="Current Song: $(basename "$CURRENT_SONG")"
-    else
-        stats+="Status: Stopped"
-    fi
-    
-    dialog --msgbox "$stats" 12 50
-}
-
-# main menu
-main_menu() {
+# Dialog untuk tambah lagu
+add_song_dialog() {
     while true; do
         local choice
-        choice=$(dialog --stdout --title "Soundboard Sunda" \
-            --menu "Select option:" 20 60 10 \
-            1 "Add Songs" \
-            2 "Remove Songs" \
-            3 "Rearrange Playlist" \
-            4 "Play Song" \
-            5 "Playback Control" \
-            6 "Show Statistics" \
-            7 "View Playlist" \
-            8 "Set Volume" \
-            9 "Exit")
+        choice=$(dialog \
+            --title "Add Song" \
+            --menu "Choose method:" \
+            12 50 5 \
+            1 "Browse Files" \
+            2 "Enter Path" \
+            3 "Back" \
+            3>&1 1>&2 2>&3)
         
         case $choice in
-            1) add_songs ;;
-            2) remove_songs ;;
-            3) rearrange_songs ;;
-            4) play_song ;;
-            5) playback_control ;;
-            6) show_stats ;;
-            7) view_playlist ;;
-            8) set_volume ;;
-            9) break ;;
-            *) break ;;
+            1)
+                # Browse files
+                local file
+                file=$(dialog \
+                    --title "Select MP3 File" \
+                    --fselect "$HOME/" \
+                    20 60 \
+                    3>&1 1>&2 2>&3)
+                
+                if [[ $? -eq 0 ]] && [[ -n "$file" ]]; then
+                    if [[ -f "$file" ]] && [[ "$file" =~ \.(mp3|MP3)$ ]]; then
+                        SONGS+=("$file")
+                        SONG_NAMES+=("$(basename "$file")")
+                        save_config
+                        dialog --msgbox "Song added!" 5 40
+                    else
+                        dialog --msgbox "Invalid file or not MP3!" 5 40
+                    fi
+                fi
+                ;;
+            2)
+                # Enter path manually
+                local path
+                path=$(dialog \
+                    --title "Enter MP3 Path" \
+                    --inputbox "Full path to MP3 file:" \
+                    8 60 \
+                    3>&1 1>&2 2>&3)
+                
+                if [[ $? -eq 0 ]] && [[ -n "$path" ]]; then
+                    if [[ -f "$path" ]] && [[ "$path" =~ \.(mp3|MP3)$ ]]; then
+                        SONGS+=("$path")
+                        SONG_NAMES+=("$(basename "$path")")
+                        save_config
+                        dialog --msgbox "Song added!" 5 40
+                    else
+                        dialog --msgbox "Invalid file or not MP3!" 5 40
+                    fi
+                fi
+                ;;
+            3|"")
+                return
+                ;;
         esac
     done
 }
 
-# lihat playlist
-view_playlist() {
-    if [[ ${#SONGS[@]} -eq 0 ]]; then
-        dialog --msgbox "Playlist is empty!" 6 40
-        return
-    fi
-    
-    local playlist="Current Playlist:\n\n"
-    for i in "${!SONG_NAMES[@]}"; do
-        playlist+="$((i+1)). ${SONG_NAMES[$i]}\n"
-    done
-    
-    dialog --msgbox "$playlist" 20 60
-}
-
-#set volume
-set_volume() {
+# Dialog untuk ganti volume
+change_volume_dialog() {
     local new_vol
-    new_vol=$(dialog --stdout --title "Set Volume" \
-        --inputbox "Enter volume (0-100):" 8 40 "$VOLUME")
+    new_vol=$(dialog \
+        --title "Change Volume" \
+        --rangebox "Set volume level (0-100):" \
+        10 50 0 100 "$VOLUME" \
+        3>&1 1>&2 2>&3)
     
-    if [[ $? -eq 0 ]] && [[ ! -z "$new_vol" ]]; then
-        if [[ $new_vol -ge 0 ]] && [[ $new_vol -le 100 ]]; then
-            VOLUME=$new_vol
-            update_volume
-            dialog --msgbox "Volume set to $VOLUME%" 6 40
-        else
-            dialog --msgbox "Volume must be between 0 and 100!" 6 50
+    if [[ $? -eq 0 ]]; then
+        VOLUME=$new_vol
+        save_config
+        
+        # UPDATE VOLUME (BELUM BERES)
+        if [[ -n "$PLAYER_PID" ]] && kill -0 "$PLAYER_PID" 2>/dev/null; then
+            local current_song=""
+            for i in "${!SONGS[@]}"; do
+                if [[ "${SONG_NAMES[$i]}" == "$NOW_PLAYING" ]]; then
+                    current_song="${SONGS[$i]}"
+                    break
+                fi
+            done
+            
+            if [[ -n "$current_song" ]]; then
+                stop_playback
+                play_song "$i"
+            fi
         fi
+        
+        dialog --msgbox "Volume set to ${VOLUME}%" 5 40
     fi
 }
 
-# Cleanup
+# Tampilkan playlist manager
+manage_playlist() {
+    while true; do
+        if [[ ${#SONGS[@]} -eq 0 ]]; then
+            dialog --msgbox "Playlist kosong!" 5 40
+            return
+        fi
+        
+        # Buat checklist untuk hapus lagu
+        local items=()
+        for i in "${!SONG_NAMES[@]}"; do
+            local name="${SONG_NAMES[$i]}"
+            if [[ ${#name} -gt 40 ]]; then
+                name="${name:0:37}..."
+            fi
+            items+=("$i" "$name" "off")
+        done
+        
+        local to_remove
+        to_remove=$(dialog \
+            --title "Manage Playlist" \
+            --checklist "Select songs to remove:" \
+            20 60 10 \
+            "${items[@]}" \
+            3>&1 1>&2 2>&3)
+        
+        if [[ $? -eq 0 ]] && [[ -n "$to_remove" ]]; then
+            for i in $(echo "$to_remove" | tr ' ' '\n' | sort -rn); do
+                unset SONGS[$i]
+                unset SONG_NAMES[$i]
+            done
+            
+            SONGS=("${SONGS[@]}")
+            SONG_NAMES=("${SONG_NAMES[@]}")
+            
+            save_config
+            dialog --msgbox "Songs removed!" 5 40
+            
+            # kalau lagu yang sedang diputar dihapus (STOP)
+            if [[ -n "$NOW_PLAYING" ]]; then
+                local still_exists=0
+                for name in "${SONG_NAMES[@]}"; do
+                    if [[ "$name" == "$NOW_PLAYING" ]]; then
+                        still_exists=1
+                        break
+                    fi
+                done
+                
+                if [[ $still_exists -eq 0 ]]; then
+                    stop_playback
+                    NOW_PLAYING=""
+                fi
+            fi
+        else
+            return
+        fi
+    done
+}
+
+# Menu utama (kalau playlist kosong)
+main_menu() {
+    while true; do
+        local choice
+        choice=$(dialog \
+            --title "Soundboard Sunda" \
+            --menu "Hello hello!\n\nTotal songs: ${#SONGS[@]}" \
+            15 50 5 \
+            1 "Buka Soundboard" \
+            2 "Tambahkan lagu/sound (.mp3)" \
+            3 "Atur (manage) Playlist" \
+            4 "Setting" \
+            5 "Exit" \
+            3>&1 1>&2 2>&3)
+        
+        case $choice in
+            1)
+                if [[ ${#SONGS[@]} -eq 0 ]]; then
+                    dialog --msgbox "Playlist kosong!\nTambahkan lagu dulu." 6 50
+                else
+                    show_soundboard
+                fi
+                ;;
+            2)
+                add_song_dialog
+                ;;
+            3)
+                manage_playlist
+                ;;
+            4)
+                # menu settings
+                local settings_choice
+                settings_choice=$(dialog \
+                    --title "Settings" \
+                    --menu "Settings:" \
+                    12 50 4 \
+                    1 "Change Volume" \
+                    2 "About" \
+                    3 "Back" \
+                    3>&1 1>&2 2>&3)
+                
+                case $settings_choice in
+                    1)
+                        change_volume_dialog
+                        ;;
+                    2)
+                        dialog --msgbox "Soundboard Sunda v1.0\n\nA terminal soundboard with Dialog UI" 10 50
+                        ;;
+                esac
+                ;;
+            5|"")
+                clear
+                exit 0
+                ;;
+        esac
+    done
+}
+
+# Cleanup function
 cleanup() {
     stop_playback
-    save_config
     clear
-    exit 0
 }
 
-#trap exit signals
-trap cleanup EXIT INT TERM
+# Main program
+main() {
+    #trap for cleanup
+    trap cleanup EXIT INT TERM
+    
+    # Check Dependensi
+    if ! check_deps; then
+        echo "Please install missing dependencies and try again."
+        exit 1
+    fi
+    
+    # Check terminal size
+    local lines=$(tput lines)
+    local cols=$(tput cols)
+    
+    if [[ $lines -lt 25 ]] || [[ $cols -lt 70 ]]; then
+        dialog --msgbox "Terminal terlalu kecil!\nMinimal: 70x25\nSaat ini: ${cols}x${lines}" 8 50
+        exit 1
+    fi
+    
+    # Load config
+    load_config
+    
+    # Show appropriate screen
+    if [[ ${#SONGS[@]} -gt 0 ]]; then
+        # Langsung ke soundboard kalau ada lagu
+        show_soundboard
+    else
+        # Ke menu utama kalau belum ada lagu
+        dialog --msgbox "Selamat datang di Soundboard Sunda!\n\nBelum ada lagu di playlist.\nTambahkan beberapa MP3 file dulu." 10 60
+        main_menu
+    fi
+}
 
-#main eksekusi
-load_config
-main_menu
+#main function
+main
