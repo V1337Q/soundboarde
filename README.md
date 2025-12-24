@@ -11,7 +11,7 @@
 
 # PREVIEW
 
-![preview](./assets/image.png)
+![preview](./assets/image2.png)
 
 
 ## 🚀 Cara Install
